@@ -66,8 +66,6 @@ static void mxt_report_data(const struct device *dev) {
     LOG_DBG("mxt_report_data: msg_count=%d, t100_first_report_id=%d",
             msg_count, data->t100_first_report_id);
 
-    uint16_t pending_fingers = 0;
-    bool last_touch_status = false;
     for (int i = 0; i < msg_count; i++) {
         struct mxt_message msg;
 
@@ -84,7 +82,6 @@ static void mxt_report_data(const struct device *dev) {
 
         if (is_t100_report(dev, msg.report_id)) {
             uint8_t finger_idx = msg.report_id - data->t100_first_report_id - 2;
-            bool pending_for_finger = (pending_fingers & BIT(finger_idx)) != 0;
 
             enum t100_touch_event ev = msg.data[0] & 0xF;
             uint16_t x_pos = msg.data[1] + (msg.data[2] << 8);
@@ -92,21 +89,40 @@ static void mxt_report_data(const struct device *dev) {
 
             LOG_DBG("T100 touch: finger=%d ev=%d x=%d y=%d", finger_idx, ev, x_pos, y_pos);
 
+            /* Only track finger 0 for single-finger mouse movement */
+            if (finger_idx >= MXT_MAX_FINGERS) {
+                break;
+            }
+
             switch (ev) {
             case DOWN:
-            case MOVE:
-            case UP:
-            case NO_EVENT:
-                if (pending_for_finger) {
-                    input_report_key(dev, INPUT_BTN_TOUCH, last_touch_status, true, K_NO_WAIT);
-                    pending_fingers = 0;
+                /* First touch: store position, report button press, no movement yet */
+                data->fingers[finger_idx].active = true;
+                data->fingers[finger_idx].last_x = x_pos;
+                data->fingers[finger_idx].last_y = y_pos;
+                if (finger_idx == 0) {
+                    input_report_key(dev, INPUT_BTN_TOUCH, 1, true, K_NO_WAIT);
                 }
-                WRITE_BIT(pending_fingers, finger_idx, 1);
-                last_touch_status = (ev != UP);
-                input_report_abs(dev, INPUT_ABS_MT_SLOT, finger_idx, false, K_NO_WAIT);
-                input_report_abs(dev, INPUT_ABS_X, x_pos, false, K_NO_WAIT);
-                input_report_abs(dev, INPUT_ABS_Y, y_pos, false, K_NO_WAIT);
-                input_report_key(dev, INPUT_BTN_TOUCH, last_touch_status, false, K_NO_WAIT);
+                break;
+            case MOVE:
+            case NO_EVENT:
+                if (finger_idx == 0 && data->fingers[0].active) {
+                    int16_t dx = (int16_t)x_pos - (int16_t)data->fingers[0].last_x;
+                    int16_t dy = (int16_t)y_pos - (int16_t)data->fingers[0].last_y;
+                    data->fingers[0].last_x = x_pos;
+                    data->fingers[0].last_y = y_pos;
+                    if (dx != 0 || dy != 0) {
+                        input_report_rel(dev, INPUT_REL_X, dx, false, K_NO_WAIT);
+                        input_report_rel(dev, INPUT_REL_Y, dy, true, K_NO_WAIT);
+                        LOG_DBG("REL move: dx=%d dy=%d", dx, dy);
+                    }
+                }
+                break;
+            case UP:
+                data->fingers[finger_idx].active = false;
+                if (finger_idx == 0) {
+                    input_report_key(dev, INPUT_BTN_TOUCH, 0, true, K_NO_WAIT);
+                }
                 break;
             default:
                 LOG_DBG("T100 ignored event type: %d", ev);
@@ -116,10 +132,6 @@ static void mxt_report_data(const struct device *dev) {
             LOG_DBG("Non-T100 message: report_id=%d", msg.report_id);
             LOG_HEXDUMP_DBG(msg.data, 5, "message data");
         }
-    }
-
-    if (pending_fingers != 0) {
-        input_report_key(dev, INPUT_BTN_TOUCH, last_touch_status, true, K_NO_WAIT);
     }
 
     return;
@@ -431,14 +443,9 @@ static int mxt_load_config(const struct device *dev,
         t100_conf.tchdidown = 2; // MXT_DOWN touch detection integration - the number of cycles before the sensor decides an MXT_DOWN event has occurred
         t100_conf.nexttchdi = 2;
         t100_conf.calcfg = 0;
-        if (config->swap_xy) {
-            t100_conf.xrange = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_Y-1);
-            t100_conf.yrange = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X-1);
-        }
-        else {
-            t100_conf.xrange = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X-1);
-            t100_conf.yrange = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_Y-1);
-        }
+        /* For REL mode, xrange/yrange define the coordinate space the chip
+         * reports in. We use the chip's native resolution (keep existing values
+         * from the initial read) so delta computation is straightforward. */
         LOG_DBG("T100 writing: ctrl=0x%02x, cfg1=0x%02x, xrange=%d, yrange=%d, tchthr=%d, gain=%d",
                 t100_conf.ctrl, t100_conf.cfg1,
                 sys_le16_to_cpu(t100_conf.xrange), sys_le16_to_cpu(t100_conf.yrange),

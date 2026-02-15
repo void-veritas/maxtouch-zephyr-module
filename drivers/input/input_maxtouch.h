@@ -5,10 +5,20 @@
 #include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/gpio.h>
 
+#define MXT_MAX_FINGERS 5
+
+struct mxt_finger_state {
+    bool active;
+    uint16_t last_x;
+    uint16_t last_y;
+};
+
 struct mxt_data {
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
+
+    struct mxt_finger_state fingers[MXT_MAX_FINGERS];
 
     uint16_t t2_encryption_status_address;
     uint16_t t5_message_processor_address;
