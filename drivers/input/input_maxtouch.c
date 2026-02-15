@@ -96,13 +96,10 @@ static void mxt_report_data(const struct device *dev) {
 
             switch (ev) {
             case DOWN:
-                /* First touch: store position, report button press, no movement yet */
+                /* First touch: store position, no movement yet */
                 data->fingers[finger_idx].active = true;
                 data->fingers[finger_idx].last_x = x_pos;
                 data->fingers[finger_idx].last_y = y_pos;
-                if (finger_idx == 0) {
-                    input_report_key(dev, INPUT_BTN_TOUCH, 1, true, K_NO_WAIT);
-                }
                 break;
             case MOVE:
             case NO_EVENT:
@@ -120,9 +117,6 @@ static void mxt_report_data(const struct device *dev) {
                 break;
             case UP:
                 data->fingers[finger_idx].active = false;
-                if (finger_idx == 0) {
-                    input_report_key(dev, INPUT_BTN_TOUCH, 0, true, K_NO_WAIT);
-                }
                 break;
             default:
                 LOG_DBG("T100 ignored event type: %d", ev);
