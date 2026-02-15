@@ -437,9 +437,18 @@ static int mxt_load_config(const struct device *dev,
         t100_conf.tchdidown = 2; // MXT_DOWN touch detection integration - the number of cycles before the sensor decides an MXT_DOWN event has occurred
         t100_conf.nexttchdi = 2;
         t100_conf.calcfg = 0;
-        /* For REL mode, xrange/yrange define the coordinate space the chip
-         * reports in. We use the chip's native resolution (keep existing values
-         * from the initial read) so delta computation is straightforward. */
+        /* xrange/yrange define the logical coordinate space for touch reports.
+         * Compute from sensor dimensions (mm * 30 ≈ ~1000-1200 range for
+         * typical small trackpads). Must be non-zero or T100 won't report. */
+        uint16_t xrange = config->sensor_width * 30;
+        uint16_t yrange = config->sensor_height * 30;
+        if (config->swap_xy) {
+            t100_conf.xrange = sys_cpu_to_le16(yrange);
+            t100_conf.yrange = sys_cpu_to_le16(xrange);
+        } else {
+            t100_conf.xrange = sys_cpu_to_le16(xrange);
+            t100_conf.yrange = sys_cpu_to_le16(yrange);
+        }
         LOG_DBG("T100 writing: ctrl=0x%02x, cfg1=0x%02x, xrange=%d, yrange=%d, tchthr=%d, gain=%d",
                 t100_conf.ctrl, t100_conf.cfg1,
                 sys_le16_to_cpu(t100_conf.xrange), sys_le16_to_cpu(t100_conf.yrange),
