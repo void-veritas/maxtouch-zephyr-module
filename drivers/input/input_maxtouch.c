@@ -51,6 +51,7 @@ static void mxt_report_data(const struct device *dev) {
     int ret;
 
     if (!data->t44_message_count_address) {
+        LOG_WRN("t44_message_count_address is 0, cannot read messages");
         return;
     }
 
@@ -61,6 +62,9 @@ static void mxt_report_data(const struct device *dev) {
         LOG_ERR("Failed to read message count: %d", ret);
         return;
     }
+
+    LOG_DBG("mxt_report_data: msg_count=%d, t100_first_report_id=%d",
+            msg_count, data->t100_first_report_id);
 
     uint16_t pending_fingers = 0;
     bool last_touch_status = false;
@@ -73,6 +77,11 @@ static void mxt_report_data(const struct device *dev) {
             return;
         }
 
+        LOG_DBG("msg[%d]: report_id=%d (T100 range: %d-%d)",
+                i, msg.report_id,
+                data->t100_first_report_id + 2,
+                data->t100_first_report_id + 2 + config->max_touch_points - 1);
+
         if (is_t100_report(dev, msg.report_id)) {
             uint8_t finger_idx = msg.report_id - data->t100_first_report_id - 2;
             bool pending_for_finger = (pending_fingers & BIT(finger_idx)) != 0;
@@ -80,6 +89,8 @@ static void mxt_report_data(const struct device *dev) {
             enum t100_touch_event ev = msg.data[0] & 0xF;
             uint16_t x_pos = msg.data[1] + (msg.data[2] << 8);
             uint16_t y_pos = msg.data[3] + (msg.data[4] << 8);
+
+            LOG_DBG("T100 touch: finger=%d ev=%d x=%d y=%d", finger_idx, ev, x_pos, y_pos);
 
             switch (ev) {
             case DOWN:
@@ -98,10 +109,11 @@ static void mxt_report_data(const struct device *dev) {
                 input_report_key(dev, INPUT_BTN_TOUCH, last_touch_status, false, K_FOREVER);
                 break;
             default:
-                // All other events are ignored
+                LOG_DBG("T100 ignored event type: %d", ev);
                 break;
             }
         } else {
+            LOG_DBG("Non-T100 message: report_id=%d", msg.report_id);
             LOG_HEXDUMP_DBG(msg.data, 5, "message data");
         }
     }
@@ -115,11 +127,13 @@ static void mxt_report_data(const struct device *dev) {
 
 static void mxt_work_cb(struct k_work *work) {
     struct mxt_data *data = CONTAINER_OF(work, struct mxt_data, work);
+    LOG_DBG("CHG work item executing");
     mxt_report_data(data->dev);
 }
 
 static void mxt_gpio_cb(const struct device *port, struct gpio_callback *cb, uint32_t pins) {
     struct mxt_data *data = CONTAINER_OF(cb, struct mxt_data, gpio_cb);
+    LOG_DBG("CHG interrupt fired! pins=0x%08x", pins);
     k_work_submit(&data->work);
 }
 
@@ -204,12 +218,25 @@ static int mxt_load_object_table(const struct device *dev, struct mxt_informatio
         case 100:
             data->t100_multiple_touch_touchscreen_address = addr;
             data->t100_first_report_id = report_id;
+            LOG_DBG("T100 found: addr=0x%04x, first_report_id=%d", addr, report_id);
+            break;
+        default:
+            LOG_DBG("Object T%d: addr=0x%04x, report_id=%d, instances=%d, report_ids=%d",
+                    obj_table.type, addr, report_id,
+                    obj_table.instances_minus_one + 1,
+                    obj_table.report_ids_per_instance);
             break;
         }
 
         object_addr += sizeof(obj_table);
         report_id += obj_table.report_ids_per_instance * (obj_table.instances_minus_one + 1);
     }
+
+    LOG_DBG("Object table summary: t44_addr=0x%04x, t5_addr=0x%04x, t100_addr=0x%04x, t100_report_id=%d",
+            data->t44_message_count_address,
+            data->t5_message_processor_address,
+            data->t100_multiple_touch_touchscreen_address,
+            data->t100_first_report_id);
 
     return 0;
 };
@@ -330,6 +357,7 @@ static int mxt_load_config(const struct device *dev,
     }
 
     if (data->t100_multiple_touch_touchscreen_address) {
+        LOG_DBG("Configuring T100 at addr=0x%04x", data->t100_multiple_touch_touchscreen_address);
         struct mxt_touch_multiscreen_t100 t100_conf = {0};
 
         ret = mxt_seq_read(dev, data->t100_multiple_touch_touchscreen_address, &t100_conf,
@@ -338,6 +366,8 @@ static int mxt_load_config(const struct device *dev,
             LOG_ERR("Failed to load the initial T100 config: %d", ret);
             return ret;
         }
+        LOG_DBG("T100 initial: ctrl=0x%02x, cfg1=0x%02x, xsize=%d, ysize=%d",
+                t100_conf.ctrl, t100_conf.cfg1, t100_conf.xsize, t100_conf.ysize);
 
         t100_conf.ctrl =
             MXT_T100_CTRL_RPTEN | MXT_T100_CTRL_ENABLE | MXT_T100_CTRL_SCANEN;  // Enable the t100 object, and enable
@@ -409,12 +439,20 @@ static int mxt_load_config(const struct device *dev,
             t100_conf.xrange = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_X-1);
             t100_conf.yrange = sys_cpu_to_le16(CONFIG_ZMK_TRACKPAD_LOGICAL_Y-1);
         }
+        LOG_DBG("T100 writing: ctrl=0x%02x, cfg1=0x%02x, xrange=%d, yrange=%d, tchthr=%d, gain=%d",
+                t100_conf.ctrl, t100_conf.cfg1,
+                sys_le16_to_cpu(t100_conf.xrange), sys_le16_to_cpu(t100_conf.yrange),
+                t100_conf.tchthr, t100_conf.gain);
+
         ret = mxt_seq_write(dev, data->t100_multiple_touch_touchscreen_address, &t100_conf,
                             sizeof(t100_conf));
         if (ret < 0) {
             LOG_ERR("Failed to set T100 config: %d", ret);
             return ret;
         }
+        LOG_DBG("T100 config written successfully");
+    } else {
+        LOG_WRN("T100 object NOT found in object table!");
     }
 
     return 0;
@@ -440,6 +478,9 @@ static int mxt_init(const struct device *dev) {
         return -EIO;
     }
 
+    LOG_DBG("Configuring CHG pin: port=%s, pin=%d, dt_flags=0x%04x",
+            config->chg.port->name, config->chg.pin, config->chg.dt_flags);
+
     gpio_pin_configure_dt(&config->chg, GPIO_INPUT);
     gpio_init_callback(&data->gpio_cb, mxt_gpio_cb, BIT(config->chg.pin));
     ret = gpio_add_callback(config->chg.port, &data->gpio_cb);
@@ -456,14 +497,24 @@ static int mxt_init(const struct device *dev) {
         return -EIO;
     }
 
+    int chg_val = gpio_pin_get_dt(&config->chg);
+    LOG_DBG("CHG pin initial state: %d (0=active/low, 1=inactive/high)", chg_val);
+
     ret = mxt_load_config(dev, &info);
     if (ret < 0) {
         LOG_ERR("Failed to load default config: %d", ret);
         return -EIO;
     }
 
+    chg_val = gpio_pin_get_dt(&config->chg);
+    LOG_DBG("CHG pin after config: %d", chg_val);
+
     // Load any existing messages to clear them, ensure our edge interrupt will fire
+    LOG_DBG("Clearing pending messages...");
     mxt_report_data(dev);
+
+    chg_val = gpio_pin_get_dt(&config->chg);
+    LOG_DBG("CHG pin after clearing messages: %d (should be 1=inactive)", chg_val);
 
     return 0;
 }
